@@ -7,18 +7,23 @@ ARG PYTHON_INSTALL_PREFIX="/opt/scalyr-agent-2/python3"
 
 ARG IMAGE_PLATFORM
 
-FROM ${BASE_IMAGE} as base_alpine
+FROM ${BASE_IMAGE} as blank_base_alpine
+
+FROM ${BASE_IMAGE} as blank_base_ubuntu
+
+FROM blank_base_alpine as build_base_alpine
 RUN apk add \
     curl tar make git gcc automake autoconf gnupg bash libstdc++ musl-dev
 
 SHELL ["/usr/bin/env", "bash", "-c"]
 
-FROM ${BASE_IMAGE} as base_ubuntu
+
+FROM blank_base_ubuntu as build_base_ubuntu
 ENV DEBIAN_FRONTEND="noninteractive"
-RUN apt update $$ apt install -y  \
+RUN apt update && apt install -y  \
     curl tar make git gcc automake autoconf gnupg2
 
-FROM base_${DISTRO} as base
+FROM build_base_${DISTRO} as build_base
 WORKDIR /tmp/build
 ARG TARGET
 ARG HOST
@@ -28,7 +33,7 @@ ENV TARGET_ROOT_PATH="/opt/x-tools/${TARGET}"
 ENV TARGET_SYSROOT="${TARGET_ROOT_PATH}/${TARGET}/sysroot"
 ENV PATH="${TARGET_ROOT_PATH}/bin:${PATH}"
 
-FROM base as build_tcl_base
+FROM build_base as build_tcl_base
 WORKDIR build_tcl
 RUN git clone "https://github.com/tcltk/tcl.git"
 WORKDIR tcl
@@ -41,18 +46,22 @@ FROM build_tcl_base as build_tcl_base_native
 RUN ./configure --prefix="${TCL_INSTALL_PREFIX}"
 RUN make -j "$(nproc)"
 RUN make DESTDIR=/tmp/root install
+RUN tar cfz /tmp/root.tar -C /tmp/root .
+
 
 FROM build_tcl_base as build_tcl_base_cross
 RUN ./configure --prefix="${TCL_INSTALL_PREFIX}" \
-    --build=x86_64-pc-linux-musl --host="${TARGET}" --target="${TARGET}"
+    --build="${HOST}" --host="${TARGET}" --target="${TARGET}"
 RUN make -j "$(nproc)"
 RUN make DESTDIR=/tmp/root install
 
 
 
-FROM base as build_sqlite
-COPY --from=build_tcl_base_native /tmp/root /
+FROM build_base as build_sqlite
+COPY --from=build_tcl_base_native /tmp/root.tar /tmp/build_tcl_base_native.tar
+RUN tar xfv /tmp/build_tcl_base_native.tar -C /
 COPY --from=build_tcl_base_cross /tmp/root ${TARGET_SYSROOT}
+
 
 
 WORKDIR build_sqlite
@@ -62,11 +71,13 @@ ARG SQLITE_VERSION_COMMIT
 RUN git checkout "${SQLITE_VERSION_COMMIT}"
 WORKDIR build
 
-RUN CFLAGS="-fPIC" LDFLAGS="-L${TARGET_SYSROOT}/usr/local/lib" ../configure --prefix=/usr/local --build=x86_64-pc-linux-musl --host="${TARGET}" --target="${TARGET}"
+RUN CFLAGS="-fPIC" LDFLAGS="-L${TARGET_SYSROOT}/usr/local/lib" ../configure \
+    --prefix=/usr/local \
+    --build="${HOST}" --host="${TARGET}" --target="${TARGET}"
 RUN make -j "$(nproc)"
 RUN make DESTDIR=/tmp/root install
 
-FROM base as build_xz
+FROM build_base as build_xz
 WORKDIR build_xz
 ADD public_keys/xz_public_key.gpg xz_public_key.gpg
 RUN gpg2 --import xz_public_key.gpg
@@ -80,11 +91,11 @@ WORKDIR "xz-${XZ_VERSION}/build"
 RUN ../configure CFLAGS="-fPIC" \
     --prefix=/usr/local \
     --enable-shared=no --disable-xzdec --disable-lzmadec \
-    --build=x86_64-pc-linux-musl --host="${TARGET}" --target="${TARGET}"
+    --build="${HOST}" --host="${TARGET}" --target="${TARGET}"
 RUN make -j "$(nproc)"
 RUN make DESTDIR="/tmp/root" install
 
-FROM base as build_zlib_base
+FROM build_base as build_zlib_base
 WORKDIR build_zlib
 ADD public_keys/zlib_public_key.gpg zlib_public_key.gpg
 RUN gpg2 --import zlib_public_key.gpg
@@ -105,7 +116,7 @@ RUN CFLAGS="-fPIC" CC="${TARGET}-gcc" ./configure  --static --prefix=/usr/local
 RUN make -j "$(nproc)"
 RUN make DESTDIR=/tmp/root install
 
-FROM base as build_bzip
+FROM build_base as build_bzip
 WORKDIR build_bzip
 ADD public_keys/bzip_keyring.gpg bzip_keyring.gpg
 RUN gpg2 --import bzip_keyring.gpg
@@ -118,7 +129,7 @@ WORKDIR bzip2-${BZIP_VERSION}
 RUN make CC="${TARGET}-gcc" install  CFLAGS="-fPIC" PREFIX="/tmp/root/usr/local" -j "$(nproc)"
 
 
-FROM base as build_util_linux
+FROM build_base as build_util_linux
 WORKDIR build_util-linux
 ADD public_keys/util_linux_public_key.gpg util_linux_public_key.gpg
 RUN gpg2 --import util_linux_public_key.gpg
@@ -131,11 +142,11 @@ RUN tar -xf util-linux.tar
 WORKDIR util-linux-${UTIL_LINUX_VERSION}
 RUN CFLAGS="-fPIC" ./configure --prefix=/usr/local \
     --disable-all-programs  --enable-libuuid --enable-shared=no \
-    --build=x86_64-pc-linux-musl --host="${TARGET}" --target="${TARGET}"
+    --build="${HOST}" --host="${TARGET}" --target="${TARGET}"
 RUN make -j "$(nproc)"
 RUN make DESTDIR=/tmp/root install
 
-FROM base as build_ncurses_base
+FROM build_base as build_ncurses_base
 WORKDIR build_ncurses
 ADD public_keys/gnu-keyring.gpg gnu-keyring.gpg
 RUN gpg2 --import gnu-keyring.gpg
@@ -156,7 +167,7 @@ FROM build_ncurses_base as build_ncurses_cross
 # the 'tic' tool that is already installed.
 COPY --from=build_ncurses_native /tmp/root /
 RUN CFLAGS="-fPIC" ../configure --prefix=/usr/local \
-    --build=x86_64-pc-linux-musl --host="${TARGET}" --target="${TARGET}"
+    --build="${HOST}" --host="${TARGET}" --target="${TARGET}"
 RUN make -j "$(nproc)"
 # The strip command from binutils is required for the installation and it seems that
 # the configure script can not use string from the cross-toolchain,
@@ -164,7 +175,7 @@ RUN make -j "$(nproc)"
 RUN ln -s "${TARGET_ROOT_PATH}/bin/${TARGET}-strip" "${TARGET_ROOT_PATH}/bin/strip"
 RUN make DESTDIR=/tmp/root install
 
-FROM base as build_libedit
+FROM build_base as build_libedit
 COPY --from=build_ncurses_cross /tmp/root "${TARGET_SYSROOT}"
 WORKDIR build_libedit
 ARG LIBEDIT_VERSION_COMMIT
@@ -178,13 +189,13 @@ RUN ../configure \
   LDFLAGS="-L${TARGET_SYSROOT}/usr/local/lib -L${TARGET_SYSROOT}/usr/local/lib64" \
     --prefix="/usr/local" \
     --enable-shared=no \
-    --build=x86_64-pc-linux-musl --host="${TARGET}" --target="${TARGET}"
+    --build="${HOST}" --host="${TARGET}" --target="${TARGET}"
 
 RUN make -j "$(nproc)"
 RUN make DESTDIR=/tmp/root install
 
 
-FROM base as build_libffi
+FROM build_base as build_libffi
 WORKDIR build_libffi
 ARG LIBFFI_VERSION
 
@@ -198,12 +209,12 @@ WORKDIR "libffi-${LIBFFI_VERSION}/build"
 RUN CFLAGS="-fPIC" ../configure \
     --prefix=/usr/local \
     --enable-shared=no --disable-multi-os-directory \
-    --build=x86_64-pc-linux-musl --host="${TARGET}" --target="${TARGET}"
+    --build="${HOST}" --host="${TARGET}" --target="${TARGET}"
 
 RUN make -j "$(nproc)"
 RUN make DESTDIR=/tmp/root install
 
-FROM base as build_openssl_base
+FROM build_base as build_openssl_base
 WORKDIR build_openssl
 ADD public_keys/openssl_public_key.asc openssl_public_key.asc
 RUN gpg2 --import openssl_public_key.asc
@@ -245,7 +256,7 @@ FROM build_openssl_${DEFAULT_OPENSSL_MAJOR_VERSION} as default_openssl
 
 
 
-FROM base as base_build_python
+FROM build_base as base_build_python
 ADD public_keys/python_pub_key.gpg python_pub_key.gpg
 ARG PYTHON_VERSION="3.11.2"
 
@@ -270,7 +281,7 @@ RUN ../configure \
 RUN make -j "$(nproc)"
 RUN make DESTDIR="/tmp/python" install
 
-FROM base_build_python as build_python
+FROM base_build_python as build_python_without_pip
 
 ARG PYTHON_INSTALL_PREFIX
 ARG OPENSSL_INSTALL_PREFIX
@@ -291,7 +302,7 @@ COPY --from=build_bootstrap_python /tmp/python/. /
 RUN ../configure \
   CFLAGS="-I${TARGET_SYSROOT}/usr/local/include -I${TARGET_SYSROOT}/usr/local/include/ncurses" \
   LDFLAGS="-L${TARGET_SYSROOT}/usr/local/lib" \
-  --build="x86_64-pc-linux-musl" \
+  --build="${HOST}" \
   --host="${TARGET}" \
   --target="${TARGET}" \
   --with-build-python=/usr/local/bin/python3 \
@@ -299,15 +310,12 @@ RUN ../configure \
 	--with-openssl="${TARGET_SYSROOT}/${OPENSSL_INSTALL_PREFIX}" \
 	--with-readline=edit \
 	--prefix="${PYTHON_INSTALL_PREFIX}" \
-	--with-ensurepip=upgrade \
+	--with-ensurepip=no \
 	--enable-ipv6 \
 	ac_cv_file__dev_ptmx=no \
 	ac_cv_file__dev_ptc=no \
 	--enable-optimizations --with-lto
 
-
-#RUN make -j "$(nproc)"
-ARG f=1
 RUN LD_LIBRARY_PATH="$(realpath .)" \
     QEMU_SET_ENV="LD_LIBRARY_PATH=$(realpath .)" \
     QEMU_LD_PREFIX="${TARGET_SYSROOT}" \
@@ -316,7 +324,7 @@ RUN LD_LIBRARY_PATH="$(realpath .)" \
 RUN make DESTDIR=/tmp/root install
 
 
-FROM --platform=${IMAGE_PLATFORM} alpine:3.18
+FROM --platform=${IMAGE_PLATFORM} blank_base_${DISTRO} as final_base
 
 ARG PYTHON_INSTALL_PREFIX
 ARG OPENSSL_INSTALL_PREFIX
@@ -326,4 +334,19 @@ ENV LD_LIBRARY_PATH="${PYTHON_INSTALL_PREFIX}/lib:${LD_LIBRARY_PATH}"
 ENV LD_LIBRARY_PATH="${OPENSSL_INSTALL_PREFIX}/lib:${LD_LIBRARY_PATH}"
 
 COPY --from=default_openssl /tmp/root /
-COPY --from=build_python /tmp/root /
+
+
+FROM final_base as python_with_pip
+COPY --from=build_python_without_pip /tmp/root /
+COPY --from=build_python_without_pip /tmp/root /tmp/root
+
+RUN python3 -m ensurepip
+RUN python3 -m pip install --upgrade pip --root /tmp/root
+
+
+COPY --from=build_openssl_1 /tmp/root /openssl1
+COPY --from=build_openssl_3 /tmp/root /openssl3
+
+FROM scratch as scratch_python
+COPY --from=python_with_pip /tmp/root /python3
+

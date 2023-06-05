@@ -8,9 +8,6 @@ IMAGE_NAME="python_test"
 TARGET="${1}"
 shift
 
-#TARGET="armv7-unknown-linux-musleabihf"
-#TARGET="x86_64-unknown-linux-musl"
-#TARGET="aarch64-unknown-linux-musl"
 
 DISTRO="alpine"
 XZ_VERSION="5.2.6"
@@ -24,6 +21,7 @@ OPENSSL_3_VERSION="3.0.7"
 LIBEDIT_VERSION_COMMIT="0cdd83b3ebd069c1dee21d81d6bf716cae7bf5da"  # tag - "upstream/3.1-20221030"
 TCL_VERSION_COMMIT="338c6692672696a76b6cb4073820426406c6f3f9" # tag - "core-8-6-13"}"
 SQLITE_VERSION_COMMIT="e671c4fbc057f8b1505655126eaf90640149ced6"  # tag - "version-3.41.2"
+
 
 case "${TARGET}" in
   x86_64-*-*-*)
@@ -43,10 +41,12 @@ esac
 
 case "${TARGET}" in
   *-*-*-gnu*)
+    DISTRO="ubuntu"
     HOST="x86_64-unknown-linux-gnu"
 
     ;;
   *-*-*-musl*)
+    DISTRO="alpine"
     HOST="x86_64-unknown-linux-musl"
   ;;
   *)
@@ -75,4 +75,6 @@ docker buildx build -t "${IMAGE_NAME}" \
   --build-arg "SQLITE_VERSION_COMMIT=${SQLITE_VERSION_COMMIT}" \
   --build-arg "IMAGE_PLATFORM=${IMAGE_PLATFORM}" \
    --load \
+   --progress=plain \
+   "$@" \
   "${BUILD_DIR}"
