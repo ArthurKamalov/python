@@ -1,0 +1,329 @@
+ARG BASE_IMAGE
+ARG DISTRO
+
+ARG DEFAULT_OPENSSL_MAJOR_VERSION="3"
+ARG OPENSSL_INSTALL_PREFIX="/opt/scalyr-agent-2/openssl"
+ARG PYTHON_INSTALL_PREFIX="/opt/scalyr-agent-2/python3"
+
+ARG IMAGE_PLATFORM
+
+FROM ${BASE_IMAGE} as base_alpine
+RUN apk add \
+    curl tar make git gcc automake autoconf gnupg bash libstdc++ musl-dev
+
+SHELL ["/usr/bin/env", "bash", "-c"]
+
+FROM ${BASE_IMAGE} as base_ubuntu
+ENV DEBIAN_FRONTEND="noninteractive"
+RUN apt update $$ apt install -y  \
+    curl tar make git gcc automake autoconf gnupg2
+
+FROM base_${DISTRO} as base
+WORKDIR /tmp/build
+ARG TARGET
+ARG HOST
+ENV TARGET="${TARGET}"
+ENV HOST="${HOST}"
+ENV TARGET_ROOT_PATH="/opt/x-tools/${TARGET}"
+ENV TARGET_SYSROOT="${TARGET_ROOT_PATH}/${TARGET}/sysroot"
+ENV PATH="${TARGET_ROOT_PATH}/bin:${PATH}"
+
+FROM base as build_tcl_base
+WORKDIR build_tcl
+RUN git clone "https://github.com/tcltk/tcl.git"
+WORKDIR tcl
+ARG TCL_VERSION_COMMIT
+RUN git checkout "${TCL_VERSION_COMMIT}"
+WORKDIR unix
+ENV TCL_INSTALL_PREFIX=/usr/local
+
+FROM build_tcl_base as build_tcl_base_native
+RUN ./configure --prefix="${TCL_INSTALL_PREFIX}"
+RUN make -j "$(nproc)"
+RUN make DESTDIR=/tmp/root install
+
+FROM build_tcl_base as build_tcl_base_cross
+RUN ./configure --prefix="${TCL_INSTALL_PREFIX}" \
+    --build=x86_64-pc-linux-musl --host="${TARGET}" --target="${TARGET}"
+RUN make -j "$(nproc)"
+RUN make DESTDIR=/tmp/root install
+
+
+
+FROM base as build_sqlite
+COPY --from=build_tcl_base_native /tmp/root /
+COPY --from=build_tcl_base_cross /tmp/root ${TARGET_SYSROOT}
+
+
+WORKDIR build_sqlite
+RUN git clone "https://github.com/sqlite/sqlite.git"
+WORKDIR sqlite
+ARG SQLITE_VERSION_COMMIT
+RUN git checkout "${SQLITE_VERSION_COMMIT}"
+WORKDIR build
+
+RUN CFLAGS="-fPIC" LDFLAGS="-L${TARGET_SYSROOT}/usr/local/lib" ../configure --prefix=/usr/local --build=x86_64-pc-linux-musl --host="${TARGET}" --target="${TARGET}"
+RUN make -j "$(nproc)"
+RUN make DESTDIR=/tmp/root install
+
+FROM base as build_xz
+WORKDIR build_xz
+ADD public_keys/xz_public_key.gpg xz_public_key.gpg
+RUN gpg2 --import xz_public_key.gpg
+ARG XZ_VERSION
+
+RUN curl -L "https://tukaani.org/xz/xz-${XZ_VERSION}.tar.gz" > xz.tar.gz
+RUN curl -L "https://tukaani.org/xz/xz-${XZ_VERSION}.tar.gz.sig" > xz.tar.gz.sig
+RUN gpg2 --verify xz.tar.gz.sig xz.tar.gz
+RUN tar -xvf xz.tar.gz
+WORKDIR "xz-${XZ_VERSION}/build"
+RUN ../configure CFLAGS="-fPIC" \
+    --prefix=/usr/local \
+    --enable-shared=no --disable-xzdec --disable-lzmadec \
+    --build=x86_64-pc-linux-musl --host="${TARGET}" --target="${TARGET}"
+RUN make -j "$(nproc)"
+RUN make DESTDIR="/tmp/root" install
+
+FROM base as build_zlib_base
+WORKDIR build_zlib
+ADD public_keys/zlib_public_key.gpg zlib_public_key.gpg
+RUN gpg2 --import zlib_public_key.gpg
+ARG ZLIB_VERSION
+RUN curl -L "https://github.com/madler/zlib/releases/download/v${ZLIB_VERSION}/zlib-${ZLIB_VERSION}.tar.gz" > zlib.tar.gz
+RUN curl -L "https://github.com/madler/zlib/releases/download/v${ZLIB_VERSION}/zlib-${ZLIB_VERSION}.tar.gz.asc" >  zlib.tar.gz.asc
+RUN gpg2 --verify zlib.tar.gz.asc zlib.tar.gz
+RUN tar -xf "zlib.tar.gz"
+WORKDIR zlib-${ZLIB_VERSION}
+
+FROM build_zlib_base as build_zlib_native
+RUN CFLAGS="-fPIC" ./configure  --static --prefix=/usr/local
+RUN make -j "$(nproc)"
+RUN make DESTDIR=/tmp/root install
+
+FROM build_zlib_base as build_zlib
+RUN CFLAGS="-fPIC" CC="${TARGET}-gcc" ./configure  --static --prefix=/usr/local
+RUN make -j "$(nproc)"
+RUN make DESTDIR=/tmp/root install
+
+FROM base as build_bzip
+WORKDIR build_bzip
+ADD public_keys/bzip_keyring.gpg bzip_keyring.gpg
+RUN gpg2 --import bzip_keyring.gpg
+ARG BZIP_VERSION
+RUN curl -L "https://sourceware.org/pub/bzip2/bzip2-${BZIP_VERSION}.tar.gz" > bzip2.tar.gz
+RUN curl -L "https://sourceware.org/pub/bzip2/bzip2-${BZIP_VERSION}.tar.gz.sig" > bzip2.tar.gz.sig
+RUN gpg2 --verify bzip2.tar.gz.sig bzip2.tar.gz
+RUN tar -xf "bzip2.tar.gz"
+WORKDIR bzip2-${BZIP_VERSION}
+RUN make CC="${TARGET}-gcc" install  CFLAGS="-fPIC" PREFIX="/tmp/root/usr/local" -j "$(nproc)"
+
+
+FROM base as build_util_linux
+WORKDIR build_util-linux
+ADD public_keys/util_linux_public_key.gpg util_linux_public_key.gpg
+RUN gpg2 --import util_linux_public_key.gpg
+ARG UTIL_LINUX_VERSION
+RUN curl -L "https://mirrors.edge.kernel.org/pub/linux/utils/util-linux/v${UTIL_LINUX_VERSION}/util-linux-${UTIL_LINUX_VERSION}.tar.gz" > util-linux.tar.gz
+RUN curl -L "https://mirrors.edge.kernel.org/pub/linux/utils/util-linux/v${UTIL_LINUX_VERSION}/util-linux-${UTIL_LINUX_VERSION}.tar.sign" > util-linux.tar.sign
+RUN gzip -dk util-linux.tar.gz
+RUN gpg2 --verify util-linux.tar.sign util-linux.tar
+RUN tar -xf util-linux.tar
+WORKDIR util-linux-${UTIL_LINUX_VERSION}
+RUN CFLAGS="-fPIC" ./configure --prefix=/usr/local \
+    --disable-all-programs  --enable-libuuid --enable-shared=no \
+    --build=x86_64-pc-linux-musl --host="${TARGET}" --target="${TARGET}"
+RUN make -j "$(nproc)"
+RUN make DESTDIR=/tmp/root install
+
+FROM base as build_ncurses_base
+WORKDIR build_ncurses
+ADD public_keys/gnu-keyring.gpg gnu-keyring.gpg
+RUN gpg2 --import gnu-keyring.gpg
+ARG NCURSES_VERSION
+RUN curl -L "https://ftp.gnu.org/pub/gnu/ncurses/ncurses-${NCURSES_VERSION}.tar.gz" > ncurses.tar.gz
+RUN curl -L "https://ftp.gnu.org/pub/gnu/ncurses/ncurses-${NCURSES_VERSION}.tar.gz.sig" > ncurses.tar.gz.sig
+RUN gpg2 --verify  ncurses.tar.gz.sig ncurses.tar.gz
+RUN tar -xvf "ncurses.tar.gz"
+WORKDIR ncurses-${NCURSES_VERSION}/build
+
+FROM build_ncurses_base as build_ncurses_native
+RUN CFLAGS="-fPIC" ../configure --prefix=/usr/local
+RUN make -j "$(nproc)"
+RUN make DESTDIR=/tmp/root install
+
+FROM build_ncurses_base as build_ncurses_cross
+# We have to build and install it nativelly because we need
+# the 'tic' tool that is already installed.
+COPY --from=build_ncurses_native /tmp/root /
+RUN CFLAGS="-fPIC" ../configure --prefix=/usr/local \
+    --build=x86_64-pc-linux-musl --host="${TARGET}" --target="${TARGET}"
+RUN make -j "$(nproc)"
+# The strip command from binutils is required for the installation and it seems that
+# the configure script can not use string from the cross-toolchain,
+# so we just create a symlink.
+RUN ln -s "${TARGET_ROOT_PATH}/bin/${TARGET}-strip" "${TARGET_ROOT_PATH}/bin/strip"
+RUN make DESTDIR=/tmp/root install
+
+FROM base as build_libedit
+COPY --from=build_ncurses_cross /tmp/root "${TARGET_SYSROOT}"
+WORKDIR build_libedit
+ARG LIBEDIT_VERSION_COMMIT
+RUN git clone "https://salsa.debian.org/debian/libedit.git"
+WORKDIR libedit
+RUN git checkout "${LIBEDIT_VERSION_COMMIT}"
+WORKDIR build
+
+RUN ../configure \
+  CFLAGS="-fPIC -I${TARGET_SYSROOT}/usr/local/include -I${TARGET_SYSROOT}/usr/local/include/ncurses" \
+  LDFLAGS="-L${TARGET_SYSROOT}/usr/local/lib -L${TARGET_SYSROOT}/usr/local/lib64" \
+    --prefix="/usr/local" \
+    --enable-shared=no \
+    --build=x86_64-pc-linux-musl --host="${TARGET}" --target="${TARGET}"
+
+RUN make -j "$(nproc)"
+RUN make DESTDIR=/tmp/root install
+
+
+FROM base as build_libffi
+WORKDIR build_libffi
+ARG LIBFFI_VERSION
+
+RUN curl -L "https://github.com/libffi/libffi/releases/download/v${LIBFFI_VERSION}/libffi-${LIBFFI_VERSION}.tar.gz" > libffi.tar.gz
+# libffi does not provide any normal way of verifying its source, so every time when we update its
+# version we have to manually calculate its checksum and hardcode it there.
+RUN echo -n "540fb721619a6aba3bdeef7d940d8e9e0e6d2c193595bc243241b77ff9e93620  libffi.tar.gz" > libffi.tar.gz.sha256
+RUN sha256sum -c libffi.tar.gz.sha256
+RUN tar -xf libffi.tar.gz
+WORKDIR "libffi-${LIBFFI_VERSION}/build"
+RUN CFLAGS="-fPIC" ../configure \
+    --prefix=/usr/local \
+    --enable-shared=no --disable-multi-os-directory \
+    --build=x86_64-pc-linux-musl --host="${TARGET}" --target="${TARGET}"
+
+RUN make -j "$(nproc)"
+RUN make DESTDIR=/tmp/root install
+
+FROM base as build_openssl_base
+WORKDIR build_openssl
+ADD public_keys/openssl_public_key.asc openssl_public_key.asc
+RUN gpg2 --import openssl_public_key.asc
+ARG OPENSSL_INSTALL_PREFIX
+ENV OPENSSL_INSTALL_PREFIX=${OPENSSL_INSTALL_PREFIX}
+
+
+FROM build_openssl_base as build_openssl_3
+ARG OPENSSL_3_VERSION
+RUN curl -L "https://www.openssl.org/source/openssl-${OPENSSL_3_VERSION}.tar.gz" > openssl.tar.gz
+RUN curl -L "https://www.openssl.org/source/openssl-${OPENSSL_3_VERSION}.tar.gz.asc" > openssl.tar.gz.asc
+RUN gpg --verify openssl.tar.gz.asc openssl.tar.gz
+RUN tar -xf "openssl.tar.gz"
+WORKDIR "openssl-${OPENSSL_3_VERSION}/build"
+ADD configure_openssl.sh configure_openssl.sh
+RUN bash configure_openssl.sh "3" CC="${TARGET}-gcc" --prefix=${OPENSSL_INSTALL_PREFIX}
+RUN make -j "$(nproc)"
+RUN make DESTDIR=/tmp/root install_sw
+
+
+
+FROM build_openssl_base as build_openssl_1
+ARG OPENSSL_1_VERSION
+RUN curl -L "https://www.openssl.org/source/openssl-${OPENSSL_1_VERSION}.tar.gz" > openssl.tar.gz
+RUN curl -L "https://www.openssl.org/source/openssl-${OPENSSL_1_VERSION}.tar.gz.asc" > openssl.tar.gz.asc
+RUN gpg --verify openssl.tar.gz.asc openssl.tar.gz
+RUN tar -xf "openssl.tar.gz"
+WORKDIR "openssl-${OPENSSL_1_VERSION}/build"
+ADD configure_openssl.sh configure_openssl.sh
+RUN bash configure_openssl.sh "1" CC="${TARGET}-gcc" --prefix=${OPENSSL_INSTALL_PREFIX}
+RUN make -j "$(nproc)"
+RUN make DESTDIR=/tmp/root install_sw
+
+
+FROM build_openssl_${DEFAULT_OPENSSL_MAJOR_VERSION} as default_openssl
+
+
+
+
+
+
+FROM base as base_build_python
+ADD public_keys/python_pub_key.gpg python_pub_key.gpg
+ARG PYTHON_VERSION="3.11.2"
+
+RUN gpg2 --import python_pub_key.gpg
+RUN curl -L "https://www.python.org/ftp/python/${PYTHON_VERSION}/Python-${PYTHON_VERSION}.tgz" > python.tgz
+RUN curl -L "https://www.python.org/ftp/python/${PYTHON_VERSION}/Python-${PYTHON_VERSION}.tgz.asc" > python.tgz.asc
+RUN gpg --verify python.tgz.asc python.tgz
+RUN tar -xf python.tgz
+
+WORKDIR "Python-${PYTHON_VERSION}/build"
+
+
+FROM base_build_python as build_bootstrap_python
+COPY --from=build_zlib_native /tmp/root /
+
+RUN ../configure \
+    CFLAGS="-I/usr/local/include" \
+    LDFLAGS="-L/usr/local/lib" \
+    --enable-shared=no \
+    --prefix=/usr/local \
+	--with-ensurepip=no
+RUN make -j "$(nproc)"
+RUN make DESTDIR="/tmp/python" install
+
+FROM base_build_python as build_python
+
+ARG PYTHON_INSTALL_PREFIX
+ARG OPENSSL_INSTALL_PREFIX
+
+COPY --from=build_xz /tmp/root ${TARGET_SYSROOT}
+COPY --from=build_zlib /tmp/root ${TARGET_SYSROOT}
+COPY --from=build_bzip /tmp/root ${TARGET_SYSROOT}
+COPY --from=build_util_linux /tmp/root ${TARGET_SYSROOT}
+COPY --from=build_ncurses_cross /tmp/root ${TARGET_SYSROOT}
+COPY --from=build_libedit /tmp/root ${TARGET_SYSROOT}
+COPY --from=build_sqlite /tmp/root ${TARGET_SYSROOT}
+COPY --from=build_libffi /tmp/root ${TARGET_SYSROOT}
+COPY --from=default_openssl /tmp/root ${TARGET_SYSROOT}
+
+COPY --from=build_zlib_native /tmp/root /
+COPY --from=build_bootstrap_python /tmp/python/. /
+
+RUN ../configure \
+  CFLAGS="-I${TARGET_SYSROOT}/usr/local/include -I${TARGET_SYSROOT}/usr/local/include/ncurses" \
+  LDFLAGS="-L${TARGET_SYSROOT}/usr/local/lib" \
+  --build="x86_64-pc-linux-musl" \
+  --host="${TARGET}" \
+  --target="${TARGET}" \
+  --with-build-python=/usr/local/bin/python3 \
+	--enable-shared \
+	--with-openssl="${TARGET_SYSROOT}/${OPENSSL_INSTALL_PREFIX}" \
+	--with-readline=edit \
+	--prefix="${PYTHON_INSTALL_PREFIX}" \
+	--with-ensurepip=upgrade \
+	--enable-ipv6 \
+	ac_cv_file__dev_ptmx=no \
+	ac_cv_file__dev_ptc=no \
+	--enable-optimizations --with-lto
+
+
+#RUN make -j "$(nproc)"
+ARG f=1
+RUN LD_LIBRARY_PATH="$(realpath .)" \
+    QEMU_SET_ENV="LD_LIBRARY_PATH=$(realpath .)" \
+    QEMU_LD_PREFIX="${TARGET_SYSROOT}" \
+    make -j "$(nproc)"
+
+RUN make DESTDIR=/tmp/root install
+
+
+FROM --platform=${IMAGE_PLATFORM} alpine:3.18
+
+ARG PYTHON_INSTALL_PREFIX
+ARG OPENSSL_INSTALL_PREFIX
+
+ENV PATH="${PYTHON_INSTALL_PREFIX}/bin:${PATH}"
+ENV LD_LIBRARY_PATH="${PYTHON_INSTALL_PREFIX}/lib:${LD_LIBRARY_PATH}"
+ENV LD_LIBRARY_PATH="${OPENSSL_INSTALL_PREFIX}/lib:${LD_LIBRARY_PATH}"
+
+COPY --from=default_openssl /tmp/root /
+COPY --from=build_python /tmp/root /
