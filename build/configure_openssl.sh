@@ -78,7 +78,8 @@ else
 fi
 
 pwd
-../Configure "${OPENSSL_TARGET}" \
+
+../Configure "${OPENSSL_TARGET}" shared \
     ${ADDITIONAL_ARGS} \
     LDFLAGS="${LDFLAGS} ${ADDITIONAL_LDFLAGS}" \
     --libdir=lib \

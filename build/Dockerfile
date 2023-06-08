@@ -1,37 +1,60 @@
-ARG BASE_IMAGE
-ARG DISTRO
+ARG TARGET_CPU
+ARG TARGET_VENDOR
+ARG TARGET_OS
+ARG TARGET_LIBC
+ARG TARGET_ABI
+ARG TARGET="${TARGET_CPU}-${TARGET_VENDOR}-${TARGET_OS}-${TARGET_LIBC}${TARGET_ABI}"
+ARG HOST="x86_64-${TARGET_VENDOR}-${TARGET_OS}-${TARGET_LIBC}"
+ARG TARGET_ROOT_PATH="/opt/x-tools/${TARGET}"
+ARG IMAGE_PLATFORM
 
 ARG DEFAULT_OPENSSL_MAJOR_VERSION="3"
 ARG OPENSSL_INSTALL_PREFIX="/opt/scalyr-agent-2/openssl"
 ARG PYTHON_INSTALL_PREFIX="/opt/scalyr-agent-2/python3"
 
-ARG IMAGE_PLATFORM
 
-FROM ${BASE_IMAGE} as blank_base_alpine
 
-FROM ${BASE_IMAGE} as blank_base_ubuntu
 
-FROM blank_base_alpine as build_base_alpine
+FROM ghcr.io/arthurkamalov/toolchains/dev/x86_64-unknown-linux-gnu_x86_64-unknown-linux-gnu:18cbb43ba750d77ee233c83322991499b6a91895 as  cross_toolchain_x86_64-unknown-linux-gnu
+FROM ghcr.io/arthurkamalov/toolchains/dev/x86_64-unknown-linux-gnu_aarch64-unknown-linux-gnu:18cbb43ba750d77ee233c83322991499b6a91895 as cross_toolchain_aarch64-unknown-linux-gnu
+FROM ghcr.io/arthurkamalov/toolchains/dev/x86_64-unknown-linux-gnu_armv7-unknown-linux-gnueabihf:18cbb43ba750d77ee233c83322991499b6a91895 as cross_toolchain_armv7-unknown-linux-gnueabihf
+
+FROM ghcr.io/arthurkamalov/toolchains/dev/x86_64-unknown-linux-musl_x86_64-unknown-linux-musl:18cbb43ba750d77ee233c83322991499b6a91895 as cross_toolchain_x86_64-unknown-linux-musl
+FROM ghcr.io/arthurkamalov/toolchains/dev/x86_64-unknown-linux-musl_aarch64-unknown-linux-musl:18cbb43ba750d77ee233c83322991499b6a91895 as cross_toolchain_aarch64-unknown-linux-musl
+FROM ghcr.io/arthurkamalov/toolchains/dev/x86_64-unknown-linux-musl_armv7-unknown-linux-musleabihf:18cbb43ba750d77ee233c83322991499b6a91895 as cross_toolchain_armv7-unknown-linux-musleabihf
+
+FROM cross_toolchain_${TARGET} as cross_toolchain
+ARG TARGET_ROOT_PATH
+RUN mkdir -p "/tmp/root${TARGET_ROOT_PATH}"
+RUN cp -a "${TARGET_ROOT_PATH}/." "/tmp/root${TARGET_ROOT_PATH}"
+
+FROM ubuntu:jammy-20230522 as blank_base_gnu
+
+FROM alpine:3.18.0 as blank_base_musl
+
+FROM blank_base_gnu as build_base_gnu
+ENV DEBIAN_FRONTEND="noninteractive"
+RUN apt update && apt install -y  \
+    curl tar make git gcc automake autoconf pkg-config gnupg2
+
+FROM blank_base_musl as build_base_musl
 RUN apk add \
-    curl tar make git gcc automake autoconf gnupg bash libstdc++ musl-dev
+    curl tar make git gcc automake autoconf pkgconfig gnupg bash libstdc++ musl-dev
 
 SHELL ["/usr/bin/env", "bash", "-c"]
 
-
-FROM blank_base_ubuntu as build_base_ubuntu
-ENV DEBIAN_FRONTEND="noninteractive"
-RUN apt update && apt install -y  \
-    curl tar make git gcc automake autoconf gnupg2
-
-FROM build_base_${DISTRO} as build_base
-WORKDIR /tmp/build
+FROM build_base_${TARGET_LIBC} as build_base
 ARG TARGET
 ARG HOST
+ARG TARGET_ROOT_PATH
 ENV TARGET="${TARGET}"
 ENV HOST="${HOST}"
-ENV TARGET_ROOT_PATH="/opt/x-tools/${TARGET}"
 ENV TARGET_SYSROOT="${TARGET_ROOT_PATH}/${TARGET}/sysroot"
 ENV PATH="${TARGET_ROOT_PATH}/bin:${PATH}"
+
+COPY --from=cross_toolchain ${TARGET_ROOT_PATH} "${TARGET_ROOT_PATH}"
+WORKDIR /tmp/build
+
 
 FROM build_base as build_tcl_base
 WORKDIR build_tcl
@@ -211,6 +234,7 @@ RUN CFLAGS="-fPIC" ../configure \
     --enable-shared=no --disable-multi-os-directory \
     --build="${HOST}" --host="${TARGET}" --target="${TARGET}"
 
+#RUN cat config.log && false
 RUN make -j "$(nproc)"
 RUN make DESTDIR=/tmp/root install
 
@@ -220,6 +244,7 @@ ADD public_keys/openssl_public_key.asc openssl_public_key.asc
 RUN gpg2 --import openssl_public_key.asc
 ARG OPENSSL_INSTALL_PREFIX
 ENV OPENSSL_INSTALL_PREFIX=${OPENSSL_INSTALL_PREFIX}
+RUN rm ${TARGET_SYSROOT}/lib/libatomic.so*
 
 
 FROM build_openssl_base as build_openssl_3
@@ -252,10 +277,6 @@ RUN make DESTDIR=/tmp/root install_sw
 FROM build_openssl_${DEFAULT_OPENSSL_MAJOR_VERSION} as default_openssl
 
 
-
-
-
-
 FROM build_base as base_build_python
 ADD public_keys/python_pub_key.gpg python_pub_key.gpg
 ARG PYTHON_VERSION="3.11.2"
@@ -281,10 +302,18 @@ RUN ../configure \
 RUN make -j "$(nproc)"
 RUN make DESTDIR="/tmp/python" install
 
-FROM base_build_python as build_python_without_pip
+FROM base_build_python as build_python_initial
+ADD configure_python.sh configure_python.sh
+ADD build_python.sh build_python.sh
 
 ARG PYTHON_INSTALL_PREFIX
 ARG OPENSSL_INSTALL_PREFIX
+ENV PYTHON_INSTALL_PREFIX="${PYTHON_INSTALL_PREFIX}"
+ENV OPENSSL_INSTALL_PREFIX="${OPENSSL_INSTALL_PREFIX}"
+
+ENV PKG_CONFIG_DIR=""
+ENV PKG_CONFIG_LIBDIR="${TARGET_SYSROOT}/usr/local/lib/pkgconfig:${TARGET_SYSROOT}/usr/local/share/pkgconfig"
+ENV PKG_CONFIG_SYSROOT_DIR=${TARGET_SYSROOT}
 
 COPY --from=build_xz /tmp/root ${TARGET_SYSROOT}
 COPY --from=build_zlib /tmp/root ${TARGET_SYSROOT}
@@ -294,59 +323,91 @@ COPY --from=build_ncurses_cross /tmp/root ${TARGET_SYSROOT}
 COPY --from=build_libedit /tmp/root ${TARGET_SYSROOT}
 COPY --from=build_sqlite /tmp/root ${TARGET_SYSROOT}
 COPY --from=build_libffi /tmp/root ${TARGET_SYSROOT}
-COPY --from=default_openssl /tmp/root ${TARGET_SYSROOT}
+#COPY --from=build_libffi /tmp/root /
 
 COPY --from=build_zlib_native /tmp/root /
 COPY --from=build_bootstrap_python /tmp/python/. /
 
-RUN ../configure \
-  CFLAGS="-I${TARGET_SYSROOT}/usr/local/include -I${TARGET_SYSROOT}/usr/local/include/ncurses" \
-  LDFLAGS="-L${TARGET_SYSROOT}/usr/local/lib" \
-  --build="${HOST}" \
-  --host="${TARGET}" \
-  --target="${TARGET}" \
-  --with-build-python=/usr/local/bin/python3 \
-	--enable-shared \
-	--with-openssl="${TARGET_SYSROOT}/${OPENSSL_INSTALL_PREFIX}" \
-	--with-readline=edit \
-	--prefix="${PYTHON_INSTALL_PREFIX}" \
-	--with-ensurepip=no \
-	--enable-ipv6 \
-	ac_cv_file__dev_ptmx=no \
-	ac_cv_file__dev_ptc=no \
-	--enable-optimizations --with-lto
+FROM build_python_initial as build_python_with_openssl_1
+COPY --from=build_openssl_1 /tmp/root ${TARGET_SYSROOT}
 
-RUN LD_LIBRARY_PATH="$(realpath .)" \
-    QEMU_SET_ENV="LD_LIBRARY_PATH=$(realpath .)" \
-    QEMU_LD_PREFIX="${TARGET_SYSROOT}" \
-    make -j "$(nproc)"
-
+RUN bash configure_python.sh
+RUN bash build_python.sh
 RUN make DESTDIR=/tmp/root install
 
 
-FROM --platform=${IMAGE_PLATFORM} blank_base_${DISTRO} as final_base
+FROM build_python_initial as build_python_with_openssl_3
+COPY --from=build_openssl_3 /tmp/root ${TARGET_SYSROOT}
+
+RUN bash configure_python.sh
+
+    #--enable-optimizations --with-lto
+
+RUN bash build_python.sh
+
+RUN make DESTDIR=/tmp/root install
+
+FROM build_python_with_openssl_${DEFAULT_OPENSSL_MAJOR_VERSION} as build_python_with_default_openssl
+
+
+FROM ghcr.io/arthurkamalov/toolchains/dev/x86_64-unknown-linux-gnu_x86_64-unknown-linux-gnu:18cbb43ba750d77ee233c83322991499b6a91895 as  toolchain_x86_64-unknown-linux-gnu
+FROM ghcr.io/arthurkamalov/toolchains/dev/aarch64-unknown-linux-gnu_aarch64-unknown-linux-gnu:18cbb43ba750d77ee233c83322991499b6a91895 as toolchain_aarch64-unknown-linux-gnu
+FROM ghcr.io/arthurkamalov/toolchains/dev/armv7-unknown-linux-gnueabihf_armv7-unknown-linux-gnueabihf:18cbb43ba750d77ee233c83322991499b6a91895 as toolchain_armv7-unknown-linux-gnueabihf
+
+FROM ghcr.io/arthurkamalov/toolchains/dev/x86_64-unknown-linux-musl_x86_64-unknown-linux-musl:18cbb43ba750d77ee233c83322991499b6a91895 as toolchain_x86_64-unknown-linux-musl
+FROM ghcr.io/arthurkamalov/toolchains/dev/aarch64-unknown-linux-musl_aarch64-unknown-linux-musl:18cbb43ba750d77ee233c83322991499b6a91895 as toolchain_aarch64-unknown-linux-musl
+FROM ghcr.io/arthurkamalov/toolchains/dev/armv7-unknown-linux-musleabihf_armv7-unknown-linux-musleabihf:18cbb43ba750d77ee233c83322991499b6a91895 as toolchain_armv7-unknown-linux-musleabihf
+
+FROM toolchain_${TARGET} as toolchain
+ARG TARGET_ROOT_PATH
+RUN mkdir -p "/tmp/root${TARGET_ROOT_PATH}"
+RUN cp -a "${TARGET_ROOT_PATH}/." "/tmp/root${TARGET_ROOT_PATH}"
+
+
+FROM --platform=${IMAGE_PLATFORM} ubuntu:jammy-20230522 as blank_final_base_gnu
+
+FROM --platform=${IMAGE_PLATFORM} alpine:3.18.0 as blank_final_base_musl
+
+
+FROM  blank_final_base_${TARGET_LIBC} as final_base
 
 ARG PYTHON_INSTALL_PREFIX
 ARG OPENSSL_INSTALL_PREFIX
-
-ENV PATH="${PYTHON_INSTALL_PREFIX}/bin:${PATH}"
-ENV LD_LIBRARY_PATH="${PYTHON_INSTALL_PREFIX}/lib:${LD_LIBRARY_PATH}"
+ARG TARGET_ROOT_PATH
+ENV PATH="${PYTHON_INSTALL_PREFIX}/bin:${TARGET_ROOT_PATH}/bin:${PATH}"
 ENV LD_LIBRARY_PATH="${OPENSSL_INSTALL_PREFIX}/lib:${LD_LIBRARY_PATH}"
+ENV LD_LIBRARY_PATH="${PYTHON_INSTALL_PREFIX}/lib:${LD_LIBRARY_PATH}"
 
 COPY --from=default_openssl /tmp/root /
+COPY --from=toolchain /tmp/root /
 
 
-FROM final_base as python_with_pip
-COPY --from=build_python_without_pip /tmp/root /
-COPY --from=build_python_without_pip /tmp/root /tmp/root
+FROM final_base as update_pip
+
+COPY --from=default_openssl /tmp/root /
+COPY --from=build_python_with_default_openssl /tmp/root /
 
 RUN python3 -m ensurepip
 RUN python3 -m pip install --upgrade pip --root /tmp/root
 
+FROM final_base as python_with_openssl_3_with_pip
+COPY --from=build_python_with_openssl_3 /tmp/root /tmp/root
+COPY --from=update_pip /tmp/root /tmp/root
 
-COPY --from=build_openssl_1 /tmp/root /openssl1
-COPY --from=build_openssl_3 /tmp/root /openssl3
 
-FROM scratch as scratch_python
-COPY --from=python_with_pip /tmp/root /python3
+FROM final_base as python_with_openssl_1_with_pip
+COPY --from=build_python_with_openssl_1 /tmp/root /tmp/root
+COPY --from=update_pip /tmp/root /tmp/root
+
+FROM python_with_openssl_${DEFAULT_OPENSSL_MAJOR_VERSION}_with_pip as python_with_default_openssl_with_pip
+
+
+FROM final_base
+COPY --from=build_libffi /tmp/root /
+COPY --from=python_with_default_openssl_with_pip /tmp/root /
+COPY --from=build_libffi /tmp/root /
+COPY --from=build_python_with_openssl_3 /tmp/root /opt/tools/openssl_3
+COPY --from=build_python_with_openssl_1 /tmp/root /opt/tools/openssl_1
+COPY --from=python_with_openssl_3_with_pip /tmp/root /opt/tools/python_with_openssl_3
+COPY --from=python_with_openssl_1_with_pip /tmp/root /opt/tools/python_with_openssl_1
 
