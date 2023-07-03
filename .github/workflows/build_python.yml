@@ -89,8 +89,8 @@ jobs:
       - name: Build
         run: |
           docker buildx build -t test \
-            --cache-from=type=gha,scope=${{ matrix.target }}.  \
-            --cache-to=type=gha,scope=${{ matrix.target }}.  \
+            --cache-from=type=gha,scope=111  \
+            --cache-to=type=gha,scope=111 \
           . 
 
 #      - name: Build and push
