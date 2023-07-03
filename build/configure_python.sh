@@ -1,14 +1,14 @@
 set -e
 
-
+#  CFLAGS="-I${TARGET_SYSROOT}/usr/local/include -I${TARGET_SYSROOT}/usr/local/include/ncurses --sysroot=${TARGET_SYSROOT}" \
+#  LDFLAGS="${LDFLAGS} -L${TARGET_SYSROOT}/usr/local/lib --sysroot=${TARGET_SYSROOT}" \
 ../configure \
-  CFLAGS="-I${TARGET_SYSROOT}/usr/local/include -I${TARGET_SYSROOT}/usr/local/include/ncurses --sysroot=${TARGET_SYSROOT}" \
-  LDFLAGS="${LDFLAGS} -L${TARGET_SYSROOT}/usr/local/lib --sysroot=${TARGET_SYSROOT}" \
   --build="${HOST}" \
   --host="${TARGET}" \
   --target="${TARGET}" \
   --with-build-python=/usr/local/bin/python3 \
-	--enable-shared=no \
+	--enable-shared=yes \
+	--enable-static=yes \
   --with-openssl="${TARGET_SYSROOT}/${OPENSSL_INSTALL_PREFIX}" \
 	--with-readline=edit \
 	--prefix="${PYTHON_INSTALL_PREFIX}" \

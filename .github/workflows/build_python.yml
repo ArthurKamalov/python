@@ -88,9 +88,9 @@ jobs:
 
       - name: Build
         run: |
-          bash build/build_toolchain.sh ${{ matrix.toolchain.host }} ${{ matrix.toolchain.target }} \
-            -t ${{ steps.create_image_meta.outputs.tags }} \
-            --push 
+          docker buildx build -t test \
+            --cache-from=type=gha,scope=${{ matrix.toolchain.target }}.  
+            --cache-to=type=gha,scope=${{ matrix.toolchain.target }}.  
 
 #      - name: Build and push
 #        uses: docker/build-push-action@3b5e8027fcad23fda98b2e3ac259d8d67585f671 # v4.0.0

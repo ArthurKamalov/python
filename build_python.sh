@@ -83,5 +83,6 @@ docker buildx build -t "${IMAGE_NAME}" \
   --build-arg "SQLITE_VERSION_COMMIT=${SQLITE_VERSION_COMMIT}" \
    --load \
    --progress=plain \
+   --cache-to type=local,dest=/Users/arthur/PycharmProjects/python/cache \
    "$@" \
   "${BUILD_DIR}"

@@ -12,6 +12,9 @@ ARG DEFAULT_OPENSSL_MAJOR_VERSION="3"
 ARG OPENSSL_INSTALL_PREFIX="/opt/scalyr-agent-2/openssl"
 ARG PYTHON_INSTALL_PREFIX="/opt/scalyr-agent-2/python3"
 
+ARG TARGET_SYSROOT="${TARGET_ROOT_PATH}/${TARGET}/sysroot"
+ARG COMMON_DEPENDENCIES_INSTALL_PREFIX="${TARGET_SYSROOT}/usr"
+
 
 
 
@@ -47,10 +50,12 @@ FROM build_base_${TARGET_LIBC} as build_base
 ARG TARGET
 ARG HOST
 ARG TARGET_ROOT_PATH
+ARG COMMON_DEPENDENCIES_INSTALL_PREFIX
 ENV TARGET="${TARGET}"
 ENV HOST="${HOST}"
 ENV TARGET_SYSROOT="${TARGET_ROOT_PATH}/${TARGET}/sysroot"
 ENV PATH="${TARGET_ROOT_PATH}/bin:${PATH}"
+ENV COMMON_DEPENDENCIES_INSTALL_PREFIX="${COMMON_DEPENDENCIES_INSTALL_PREFIX}"
 
 COPY --from=cross_toolchain ${TARGET_ROOT_PATH} "${TARGET_ROOT_PATH}"
 WORKDIR /tmp/build
@@ -66,14 +71,14 @@ WORKDIR unix
 ENV TCL_INSTALL_PREFIX=/usr/local
 
 FROM build_tcl_base as build_tcl_base_native
-RUN ./configure --prefix="${TCL_INSTALL_PREFIX}"
+RUN ./configure --prefix=/usr/local
 RUN make -j "$(nproc)"
 RUN make DESTDIR=/tmp/root install
 RUN tar cfz /tmp/root.tar -C /tmp/root .
 
 
 FROM build_tcl_base as build_tcl_base_cross
-RUN ./configure --prefix="${TCL_INSTALL_PREFIX}" \
+RUN ./configure --prefix="${COMMON_DEPENDENCIES_INSTALL_PREFIX}" \
     --build="${HOST}" --host="${TARGET}" --target="${TARGET}"
 RUN make -j "$(nproc)"
 RUN make DESTDIR=/tmp/root install
@@ -81,21 +86,25 @@ RUN make DESTDIR=/tmp/root install
 
 
 FROM build_base as build_sqlite
-COPY --from=build_tcl_base_native /tmp/root.tar /tmp/build_tcl_base_native.tar
-RUN tar xfv /tmp/build_tcl_base_native.tar -C /
-COPY --from=build_tcl_base_cross /tmp/root ${TARGET_SYSROOT}
+#COPY --from=build_tcl_base_native /tmp/root.tar /tmp/build_tcl_base_native.tar
+#RUN tar xfv /tmp/build_tcl_base_native.tar -C /
+#COPY --from=build_tcl_base_cross /tmp/root/. /
 
 
 
 WORKDIR build_sqlite
+#ARG d=1
 RUN git clone "https://github.com/sqlite/sqlite.git"
 WORKDIR sqlite
 ARG SQLITE_VERSION_COMMIT
 RUN git checkout "${SQLITE_VERSION_COMMIT}"
 WORKDIR build
-
-RUN CFLAGS="-fPIC" LDFLAGS="-L${TARGET_SYSROOT}/usr/local/lib" ../configure \
-    --prefix=/usr/local \
+RUN apk add tcl
+#COPY --from=build_tcl_base_native /tmp/root.tar /tmp/build_tcl_base_native.tar
+#RUN tar xfv /tmp/build_tcl_base_native.tar -C /
+#COPY --from=build_tcl_base_cross /tmp/root/. /
+RUN CFLAGS="-fPIC" LDFLAGS="-L${TARGET_SYSROOT}${COMMON_DEPENDENCIES_INSTALL_PREFIX}" ../configure \
+    --prefix="${COMMON_DEPENDENCIES_INSTALL_PREFIX}" \
     --build="${HOST}" --host="${TARGET}" --target="${TARGET}"
 RUN make -j "$(nproc)"
 RUN make DESTDIR=/tmp/root install
@@ -112,7 +121,7 @@ RUN gpg2 --verify xz.tar.gz.sig xz.tar.gz
 RUN tar -xvf xz.tar.gz
 WORKDIR "xz-${XZ_VERSION}/build"
 RUN ../configure CFLAGS="-fPIC" \
-    --prefix=/usr/local \
+    --prefix="${COMMON_DEPENDENCIES_INSTALL_PREFIX}" \
     --enable-shared=no --disable-xzdec --disable-lzmadec \
     --build="${HOST}" --host="${TARGET}" --target="${TARGET}"
 RUN make -j "$(nproc)"
@@ -135,7 +144,7 @@ RUN make -j "$(nproc)"
 RUN make DESTDIR=/tmp/root install
 
 FROM build_zlib_base as build_zlib
-RUN CFLAGS="-fPIC" CC="${TARGET}-gcc" ./configure  --static --prefix=/usr/local
+RUN CFLAGS="-fPIC" CC="${TARGET}-gcc" ./configure  --static --prefix="${COMMON_DEPENDENCIES_INSTALL_PREFIX}"
 RUN make -j "$(nproc)"
 RUN make DESTDIR=/tmp/root install
 
@@ -149,7 +158,7 @@ RUN curl -L "https://sourceware.org/pub/bzip2/bzip2-${BZIP_VERSION}.tar.gz.sig" 
 RUN gpg2 --verify bzip2.tar.gz.sig bzip2.tar.gz
 RUN tar -xf "bzip2.tar.gz"
 WORKDIR bzip2-${BZIP_VERSION}
-RUN make CC="${TARGET}-gcc" install  CFLAGS="-fPIC" PREFIX="/tmp/root/usr/local" -j "$(nproc)"
+RUN make CC="${TARGET}-gcc" install  CFLAGS="-fPIC" PREFIX="/tmp/root"${COMMON_DEPENDENCIES_INSTALL_PREFIX}"" -j "$(nproc)"
 
 
 FROM build_base as build_util_linux
@@ -163,7 +172,7 @@ RUN gzip -dk util-linux.tar.gz
 RUN gpg2 --verify util-linux.tar.sign util-linux.tar
 RUN tar -xf util-linux.tar
 WORKDIR util-linux-${UTIL_LINUX_VERSION}
-RUN CFLAGS="-fPIC" ./configure --prefix=/usr/local \
+RUN CFLAGS="-fPIC" ./configure --prefix="${COMMON_DEPENDENCIES_INSTALL_PREFIX}" \
     --disable-all-programs  --enable-libuuid --enable-shared=no \
     --build="${HOST}" --host="${TARGET}" --target="${TARGET}"
 RUN make -j "$(nproc)"
@@ -189,7 +198,7 @@ FROM build_ncurses_base as build_ncurses_cross
 # We have to build and install it nativelly because we need
 # the 'tic' tool that is already installed.
 COPY --from=build_ncurses_native /tmp/root /
-RUN CFLAGS="-fPIC" ../configure --prefix=/usr/local \
+RUN CFLAGS="-fPIC" ../configure --prefix="${COMMON_DEPENDENCIES_INSTALL_PREFIX}" \
     --build="${HOST}" --host="${TARGET}" --target="${TARGET}"
 RUN make -j "$(nproc)"
 # The strip command from binutils is required for the installation and it seems that
@@ -210,7 +219,7 @@ WORKDIR build
 RUN ../configure \
   CFLAGS="-fPIC -I${TARGET_SYSROOT}/usr/local/include -I${TARGET_SYSROOT}/usr/local/include/ncurses" \
   LDFLAGS="-L${TARGET_SYSROOT}/usr/local/lib -L${TARGET_SYSROOT}/usr/local/lib64" \
-    --prefix="/usr/local" \
+    --prefix=""${COMMON_DEPENDENCIES_INSTALL_PREFIX}"" \
     --enable-shared=no \
     --build="${HOST}" --host="${TARGET}" --target="${TARGET}"
 
@@ -230,7 +239,7 @@ RUN sha256sum -c libffi.tar.gz.sha256
 RUN tar -xf libffi.tar.gz
 WORKDIR "libffi-${LIBFFI_VERSION}/build"
 RUN CFLAGS="-fPIC" ../configure \
-    --prefix=/usr/local \
+    --prefix="${COMMON_DEPENDENCIES_INSTALL_PREFIX}" \
     --enable-shared=no --disable-multi-os-directory \
     --build="${HOST}" --host="${TARGET}" --target="${TARGET}"
 
@@ -312,18 +321,26 @@ ENV PYTHON_INSTALL_PREFIX="${PYTHON_INSTALL_PREFIX}"
 ENV OPENSSL_INSTALL_PREFIX="${OPENSSL_INSTALL_PREFIX}"
 
 ENV PKG_CONFIG_DIR=""
-ENV PKG_CONFIG_LIBDIR="${TARGET_SYSROOT}/usr/local/lib/pkgconfig:${TARGET_SYSROOT}/usr/local/share/pkgconfig"
+ENV PKG_CONFIG_LIBDIR="${TARGET_SYSROOT}/usr/lib/pkgconfig:${TARGET_SYSROOT}/usr/share/pkgconfig"
 ENV PKG_CONFIG_SYSROOT_DIR=${TARGET_SYSROOT}
 
-COPY --from=build_xz /tmp/root ${TARGET_SYSROOT}
-COPY --from=build_zlib /tmp/root ${TARGET_SYSROOT}
-COPY --from=build_bzip /tmp/root ${TARGET_SYSROOT}
-COPY --from=build_util_linux /tmp/root ${TARGET_SYSROOT}
-COPY --from=build_ncurses_cross /tmp/root ${TARGET_SYSROOT}
-COPY --from=build_libedit /tmp/root ${TARGET_SYSROOT}
-COPY --from=build_sqlite /tmp/root ${TARGET_SYSROOT}
-COPY --from=build_libffi /tmp/root ${TARGET_SYSROOT}
-#COPY --from=build_libffi /tmp/root /
+#COPY --from=build_xz /tmp/root ${TARGET_SYSROOT}
+#COPY --from=build_zlib /tmp/root ${TARGET_SYSROOT}
+#COPY --from=build_bzip /tmp/root ${TARGET_SYSROOT}
+#COPY --from=build_util_linux /tmp/root ${TARGET_SYSROOT}
+#COPY --from=build_ncurses_cross /tmp/root ${TARGET_SYSROOT}
+#COPY --from=build_libedit /tmp/root ${TARGET_SYSROOT}
+#COPY --from=build_sqlite /tmp/root ${TARGET_SYSROOT}
+#COPY --from=build_libffi /tmp/root ${TARGET_SYSROOT}
+
+COPY --from=build_xz /tmp/root /
+COPY --from=build_zlib /tmp/root /
+COPY --from=build_bzip /tmp/root /
+COPY --from=build_util_linux /tmp/root /
+COPY --from=build_ncurses_cross /tmp/root /
+COPY --from=build_libedit /tmp/root /
+COPY --from=build_sqlite /tmp/root /
+COPY --from=build_libffi /tmp/root /
 
 COPY --from=build_zlib_native /tmp/root /
 COPY --from=build_bootstrap_python /tmp/python/. /
@@ -339,7 +356,10 @@ RUN make DESTDIR=/tmp/root install
 FROM build_python_initial as build_python_with_openssl_3
 COPY --from=build_openssl_3 /tmp/root ${TARGET_SYSROOT}
 
-RUN bash configure_python.sh
+ADD create_toolchain_links.sh create_toolchain_links.sh
+
+RUN bash create_toolchain_links.sh
+RUN CC="gcc" AR="ar" LDFLAGS="-static-libgcc" bash configure_python.sh
 
     #--enable-optimizations --with-lto
 
@@ -375,7 +395,7 @@ ARG PYTHON_INSTALL_PREFIX
 ARG OPENSSL_INSTALL_PREFIX
 ARG TARGET_ROOT_PATH
 ENV PATH="${PYTHON_INSTALL_PREFIX}/bin:${TARGET_ROOT_PATH}/bin:${PATH}"
-ENV LD_LIBRARY_PATH="${OPENSSL_INSTALL_PREFIX}/lib:${LD_LIBRARY_PATH}"
+#ENV LD_LIBRARY_PATH="${OPENSSL_INSTALL_PREFIX}/lib:${LD_LIBRARY_PATH}"
 ENV LD_LIBRARY_PATH="${PYTHON_INSTALL_PREFIX}/lib:${LD_LIBRARY_PATH}"
 
 COPY --from=default_openssl /tmp/root /
